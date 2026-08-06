@@ -1,20 +1,19 @@
 # claude-multi-instances
 
-Rode múltiplas instâncias do **Claude Desktop** no macOS, cada uma logada em
+Rode múltiplas instâncias do **Claude Desktop** (macOS, Windows, Linux), cada uma logada em
 uma conta diferente (ex: empresa + pessoal), com **Cowork funcionando
 normalmente em todas elas**.
 
 ## O problema
 
-O Claude Desktop normalmente permite apenas uma conta logada por vez. Truques
-como symlinks ou mover a pasta de dados entre contas quebram o Cowork, porque
-ele roda uma VM local (Apple Virtualization/VirtioFS) que fica presa à pasta
-de dados padrão do app:
+O Claude Desktop normalmente permite apenas uma conta logada por vez em uma máquina.
+Truques como symlinks ou mover a pasta de dados entre contas quebram o Cowork:
 
-- **Symlinks** quebram a resolução de path do VirtioFS quando a VM tenta
-  montar o disco.
-- **Mover a pasta** enquanto o app está aberto causa race condition, já que a
-  VM mantém locks de arquivo nos discos dentro dela.
+- **macOS**: A VM roda em Apple Virtualization/VirtioFS, presa à pasta de dados padrão.
+  Symlinks quebram a resolução de path do VirtioFS, e mover a pasta enquanto o app
+  está aberto causa race condition de locks de arquivo.
+- **Windows e Linux**: O Cowork não consegue funcionar corretamente se a pasta de dados
+  mudar ou ficar inacessível, o que acontece quando trocamos de conta.
 
 ## A solução
 
@@ -32,7 +31,9 @@ Créditos pela descoberta original: [philippstracker.com/multiple-claude-instanc
 
 ## Scripts disponíveis
 
-### `scripts/setup-desktop-launchers.sh`
+### macOS
+
+#### `scripts/setup-desktop-launchers.sh`
 
 Cria arquivos `.command` clicáveis na Área de Trabalho (um por conta). Dê
 duplo clique para abrir a instância correspondente.
@@ -42,7 +43,7 @@ chmod +x scripts/setup-desktop-launchers.sh
 ./scripts/setup-desktop-launchers.sh
 ```
 
-### `scripts/setup-raycast-scripts.sh`
+#### `scripts/setup-raycast-scripts.sh`
 
 Cria [Script Commands](https://developers.raycast.com/basics/create-your-first-script-command)
 do [Raycast](https://raycast.com), para abrir cada instância direto da busca
@@ -56,6 +57,34 @@ chmod +x scripts/setup-raycast-scripts.sh
 Depois, no Raycast: **Preferências → Extensions → Script Commands → "+" → Add
 Script Directory**, e aponte para `~/.claude-instances/raycast-scripts`. As
 ações aparecem buscando por "Claude".
+
+### Windows
+
+#### `scripts/setup-windows-launchers.ps1`
+
+Cria atalhos `.lnk` na Área de Trabalho (um por conta). Clique para abrir
+a instância correspondente.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/setup-windows-launchers.ps1
+```
+
+Se receber erro de política de execução, execute o PowerShell como Administrador.
+
+### Linux
+
+#### `scripts/setup-linux-launchers.sh`
+
+Cria arquivos `.desktop` na Área de Trabalho (um por conta). Clique para abrir
+a instância correspondente.
+
+```bash
+chmod +x scripts/setup-linux-launchers.sh
+./scripts/setup-linux-launchers.sh
+```
+
+Se Claude não estiver em `/usr/bin/claude`, edite a variável `APP_PATH` no script
+antes de executar.
 
 ## Como usar (primeira vez)
 
@@ -72,13 +101,23 @@ ações aparecem buscando por "Claude".
 
 ## Pré-requisitos
 
-- macOS
+### macOS
 - Claude Desktop instalado em `/Applications/Claude.app` (ajuste `APP_PATH`
   no topo do script se instalou em outro lugar)
 - [Raycast](https://raycast.com) instalado, se for usar
   `setup-raycast-scripts.sh` (a extensão nativa Script Commands já vem
   habilitada)
-- Nenhuma permissão especial do macOS (Acessibilidade/Automação) é necessária
+- Nenhuma permissão especial (Acessibilidade/Automação) é necessária
+
+### Windows
+- Claude Desktop instalado (localmente em `%LOCALAPPDATA%\Programs\Claude`)
+- PowerShell 5.0+ ou Windows PowerShell executável como Administrador
+- Git for Windows (opcional, apenas se clonar o repo)
+
+### Linux
+- Claude Desktop instalado (executável acessível como `claude`)
+- Shell bash ou compatível
+- Git (opcional, apenas se clonar o repo)
 
 ## Personalizando
 
