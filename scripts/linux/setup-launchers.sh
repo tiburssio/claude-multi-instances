@@ -32,10 +32,21 @@ for i in "${!INSTANCE_NAMES[@]}"; do
   fi
 
   prepare_instance_dir "$service" "$instance_dir"
+  if [ "$service" = "codex" ] && [ ! -x "$instance_dir/run" ]; then
+    echo "Não consegui criar o runner do Codex em $instance_dir"
+    continue
+  fi
   desktop_path="$LAUNCHER_DIR/$label ($name).desktop"
   exec_args="$(linux_exec_args "$service" "$instance_dir")"
   icon="$(service_linux_icon "$service")"
   comment="$(service_linux_comment "$service" "$name")"
+  if [ "$service" = "codex" ]; then
+    exec_line="\"$instance_dir/run\""
+    terminal="true"
+  else
+    exec_line="$app_path $exec_args"
+    terminal="false"
+  fi
 
   cat > "$desktop_path" <<EOF
 [Desktop Entry]
@@ -43,9 +54,9 @@ Version=1.0
 Type=Application
 Name=$label ($name)
 Comment=$comment
-Exec=$app_path $exec_args
+Exec=$exec_line
 Icon=$icon
-Terminal=false
+Terminal=$terminal
 Categories=Development;
 EOF
 
@@ -56,7 +67,7 @@ EOF
 done
 
 if [ "$created" -eq 0 ]; then
-  echo "Defina CLAUDE_APP_PATH / CURSOR_APP_PATH se o binário não estiver no PATH."
+  echo "Defina CLAUDE_APP_PATH / CURSOR_APP_PATH / CODEX_BIN se o binário não estiver no PATH."
   die "Nenhum launcher criado."
 fi
 
@@ -86,6 +97,10 @@ if list_has "$created_services" claude; then
 fi
 if list_has "$created_services" cursor; then
   echo "- Cursor: o atalho original continua no perfil padrão."
+fi
+if list_has "$created_services" codex; then
+  echo "- Codex: abre um terminal com CODEX_HOME na pasta da instância."
+  echo "- Codex: faça login em cada pasta. Não copie auth.json."
 fi
 echo "- Lista de contas: $INSTANCES_CONF"
 

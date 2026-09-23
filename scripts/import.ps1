@@ -1,11 +1,11 @@
-# Importa o perfil padrão do Claude/Cursor para instâncias isoladas.
+# Importa o perfil padrão do Claude/Cursor/Codex para instâncias isoladas.
 #
 # Uso:
 #   powershell -ExecutionPolicy Bypass -File scripts/import.ps1
 #   powershell -ExecutionPolicy Bypass -File scripts/import.ps1 -Service claude
 
 param(
-    [ValidateSet("claude", "cursor")]
+    [ValidateSet("claude", "cursor", "codex")]
     [string]$Service
 )
 

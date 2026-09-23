@@ -8,6 +8,7 @@ service_default_user_data_dir() {
       case "$service" in
         claude) echo "$HOME/Library/Application Support/Claude" ;;
         cursor) echo "$HOME/Library/Application Support/Cursor" ;;
+        codex) echo "$HOME/.codex" ;;
         *) die "Serviço desconhecido: $service" ;;
       esac
       ;;
@@ -15,6 +16,7 @@ service_default_user_data_dir() {
       case "$service" in
         claude) echo "${APPDATA:-$HOME/AppData/Roaming}/Claude" ;;
         cursor) echo "${APPDATA:-$HOME/AppData/Roaming}/Cursor" ;;
+        codex) echo "$HOME/.codex" ;;
         *) die "Serviço desconhecido: $service" ;;
       esac
       ;;
@@ -22,6 +24,7 @@ service_default_user_data_dir() {
       case "$service" in
         claude) echo "$HOME/.config/Claude" ;;
         cursor) echo "$HOME/.config/Cursor" ;;
+        codex) echo "$HOME/.codex" ;;
         *) die "Serviço desconhecido: $service" ;;
       esac
       ;;
@@ -31,7 +34,7 @@ service_default_user_data_dir() {
 service_default_extensions_dir() {
   case "$1" in
     cursor) echo "$HOME/.cursor/extensions" ;;
-    claude) echo "" ;;
+    claude|codex) echo "" ;;
     *) die "Serviço desconhecido: $1" ;;
   esac
 }
@@ -47,6 +50,10 @@ instance_has_profile_data() {
   [ -d "$dir/vm_bundles" ] && return 0
   [ -d "$dir/Local Storage" ] && return 0
   [ -d "$dir/IndexedDB" ] && return 0
+  [ -f "$dir/config.toml" ] && return 0
+  [ -f "$dir/auth.json" ] && return 0
+  [ -f "$dir/history.jsonl" ] && return 0
+  [ -d "$dir/sessions" ] && return 0
   return 1
 }
 
@@ -96,6 +103,7 @@ ensure_profiles_unlocked() {
 
 rsync_profile() {
   local src="$1" dest="$2"
+  shift 2
   if ! command -v rsync >/dev/null 2>&1; then
     die "rsync não encontrado. Instale rsync para importar o perfil."
   fi
@@ -113,6 +121,7 @@ rsync_profile() {
     --exclude 'SingletonLock' \
     --exclude 'SingletonSocket' \
     --exclude 'SingletonCookie' \
+    "$@" \
     "$src/" "$dest/"
 }
 
@@ -122,26 +131,36 @@ import_default_to_instance() {
   src="$(service_default_user_data_dir "$service")"
   dest="$(service_instances_base "$service")/$name"
 
-  echo "Copiando perfil padrão → $service:$name"
-  echo "  de: $src"
-  echo "  para: $dest"
+  say "Copiando perfil padrão → $service:$name"
+  say "  de: $src"
+  say "  para: $dest"
   prepare_instance_dir "$service" "$dest"
-  rsync_profile "$src" "$dest"
+  case "$service" in
+    codex)
+      rsync_profile "$src" "$dest" --exclude 'auth.json'
+      write_codex_runner "$dest" >/dev/null 2>&1 || true
+      say "  auth.json não copiado (refresh OAuth é de uso único)."
+      say "  Nesta instância: $(codex_shim_name "$name") login"
+      say "  Não use ~/.codex e esta pasta ao mesmo tempo com o mesmo login."
+      ;;
+    *)
+      rsync_profile "$src" "$dest"
+      ;;
+  esac
 
   ext_src="$(service_default_extensions_dir "$service")"
   if [ -n "$ext_src" ] && [ -d "$ext_src" ]; then
     ext_dest="$dest/extensions"
     mkdir -p "$ext_dest"
-    echo "  extensões: $ext_src → $ext_dest"
+    say "  extensões: $ext_src → $ext_dest"
     rsync -a "$ext_src/" "$ext_dest/"
   fi
-  echo "Pronto: $service:$name"
+  say "Pronto: $service:$name"
 }
 
 prompt_and_import_default_data() {
   local service="$1"
-  local names=() n i count all_n skip_n src size ans chosen idx
-  local dest_names=() lock_dirs=()
+  local names=() empty=() n src dest_names=() lock_dirs=()
 
   if [ "${SKIP_IMPORT:-}" = "1" ]; then
     return 0
@@ -153,79 +172,32 @@ prompt_and_import_default_data() {
   while IFS= read -r n; do
     [ -n "$n" ] && names+=("$n")
   done < <(names_for_service "$service")
-  count=${#names[@]}
-  if [ "$count" -eq 0 ]; then
+  if [ "${#names[@]}" -eq 0 ]; then
+    return 0
+  fi
+
+  for n in "${names[@]}"; do
+    if ! instance_has_profile_data "$(instance_dir "$service" "$n")"; then
+      empty+=("$n")
+    fi
+  done
+  if [ "${#empty[@]}" -eq 0 ]; then
     return 0
   fi
 
   src="$(service_default_user_data_dir "$service")"
   if [ ! -d "$src" ]; then
-    echo "Perfil padrão do $(service_label "$service") não encontrado ($src). Pulando import."
-    return 0
-  fi
-
-  all_n=$((count + 1))
-  skip_n=$((count + 2))
-  size="$(du -sh "$src" 2>/dev/null | awk '{print $1}')"
-
-  echo ""
-  echo "Quer colocar os dados do $(service_label "$service") padrão (~$size) em:"
-  i=0
-  while [ "$i" -lt "$count" ]; do
-    n="${names[$i]}"
-    if instance_has_profile_data "$(instance_dir "$service" "$n")"; then
-      echo "  $((i + 1))) Somente no $n  (já tem dados)"
-    else
-      echo "  $((i + 1))) Somente no $n"
-    fi
-    i=$((i + 1))
-  done
-  echo "  $all_n) Todas as instâncias vazias (não mexe nas que já têm dados)"
-  echo "  $skip_n) Não importar"
-  echo "Várias: 1,3"
-  echo ""
-  echo "O perfil original não é apagado. Setup nunca apaga pastas de instâncias existentes."
-
-  while true; do
-    ans="$(ask "Escolha [$skip_n]: ")"
-    chosen=$(parse_numbered_pick "$ans" "$count") || continue
-    break
-  done
-
-  if [ -z "$chosen" ]; then
-    echo "Import do $(service_label "$service") pulado."
     return 0
   fi
 
   dest_names=()
-  if [ "$chosen" = "__ALL__" ]; then
-    for n in "${names[@]}"; do
-      if instance_has_profile_data "$(instance_dir "$service" "$n")"; then
-        echo "Mantendo $service:$n (já tem dados)."
-        continue
-      fi
-      dest_names+=("$n")
-    done
-  else
-    while IFS= read -r idx; do
-      [ -n "$idx" ] || continue
-      n="${names[$idx]}"
-      if instance_has_profile_data "$(instance_dir "$service" "$n")"; then
-        if confirm_overwrite_instance "$n"; then
-          dest_names+=("$n")
-        else
-          echo "Mantendo $service:$n."
-        fi
-        continue
-      fi
-      dest_names+=("$n")
-    done <<EOF
-$chosen
-EOF
-  fi
+  for n in "${empty[@]}"; do
+    case "$(ask "Copiar perfil original do $(service_label "$service") para $n? [y/N] ")" in
+      y|Y|s|S|sim|Sim) dest_names+=("$n") ;;
+    esac
+  done
 
   if [ "${#dest_names[@]}" -eq 0 ]; then
-    echo "Nada para importar."
     return 0
   fi
 
@@ -235,7 +207,7 @@ EOF
   done
 
   if ! ensure_profiles_unlocked "${lock_dirs[@]}"; then
-    echo "Import do $(service_label "$service") cancelado."
+    echo "Cópia do $(service_label "$service") cancelada."
     return 0
   fi
 

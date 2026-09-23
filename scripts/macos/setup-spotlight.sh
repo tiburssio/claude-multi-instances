@@ -98,19 +98,39 @@ for i in "${!INSTANCE_NAMES[@]}"; do
   instance_dir="$(service_instances_base "$service")/$name"
   display_name="$label ($name)"
   dest="$APPS_DIR/$display_name.app"
+  icon_src="$app_path"
+  if [ "$service" = "codex" ]; then
+    for terminal_app in \
+      "/System/Applications/Utilities/Terminal.app" \
+      "/Applications/Utilities/Terminal.app"
+    do
+      if [ -d "$terminal_app" ]; then
+        icon_src="$terminal_app"
+        break
+      fi
+    done
+  fi
 
-  if [ ! -d "$app_path" ]; then
+  if ! macos_service_ready "$service"; then
     if ! list_has "$skipped_services" "$service"; then
-      echo "App não encontrado: $app_path ($service)"
+      if [ "$service" = "codex" ]; then
+        echo "codex não encontrado no PATH"
+      else
+        echo "App não encontrado: $app_path ($service)"
+      fi
       skipped_services="$(list_add "$skipped_services" "$service")"
     fi
     continue
   fi
 
   prepare_instance_dir "$service" "$instance_dir"
+  if [ "$service" = "codex" ] && [ ! -x "$instance_dir/launch.command" ]; then
+    echo "Não consegui criar o runner do Codex em $instance_dir"
+    continue
+  fi
   launch_line="$(macos_launch_line "$service" "$app_path" "$instance_dir")"
   launch_line="${launch_line%$'\n'}"
-  create_app_bundle "$display_name" "$(bundle_id_for "$service" "$name")" "$launch_line" "$app_path" "$dest"
+  create_app_bundle "$display_name" "$(bundle_id_for "$service" "$name")" "$launch_line" "$icon_src" "$dest"
   echo "Criado: $dest  -> dados em $instance_dir"
   created=$((created + 1))
   created_services="$(list_add "$created_services" "$service")"
@@ -138,6 +158,9 @@ for i in "${!INSTANCE_NAMES[@]}"; do
 done
 echo "Os apps ficam em $APPS_DIR — não na Área de Trabalho."
 echo "O ícone original no Dock continua sendo o perfil padrão."
+if list_has "$created_services" codex; then
+  echo "Codex abre o Terminal com CODEX_HOME na pasta da instância."
+fi
 echo ""
 echo "Lista de contas: $INSTANCES_CONF"
 

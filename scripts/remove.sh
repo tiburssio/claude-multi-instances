@@ -7,11 +7,11 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$SCRIPT_DIR/lib/common.sh"
 
 usage() {
-  echo "Uso: $0 [serviço:nome ...] [claude|cursor|all] [--yes]"
+  echo "Uso: $0 [serviço:nome ...] [claude|cursor|codex|all] [--yes]"
   echo ""
   echo "Sem argumentos: lista as contas de instances.conf e pede confirmação."
   echo "Com serviço:nome: apaga só essas instâncias (dados + atalhos + linha do conf)."
-  echo "claude|cursor|all: todas as contas desse app que estão no conf."
+  echo "claude|cursor|codex|all: todas as contas desse app que estão no conf."
   echo "O app original e o perfil padrão permanecem. Pastas que não estão no conf"
   echo "não são apagadas."
   exit 1
@@ -25,11 +25,11 @@ for arg in "$@"; do
   case "$arg" in
     --yes) YES=1 ;;
     -h|--help) usage ;;
-    claude|cursor)
+    claude|cursor|codex)
       SERVICES+=("$arg")
       ;;
     all)
-      SERVICES+=(claude cursor)
+      SERVICES+=(claude cursor codex)
       ;;
     *:*)
       service="${arg%%:*}"

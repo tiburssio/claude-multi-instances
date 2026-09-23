@@ -1,10 +1,11 @@
 #!/bin/bash
-# Importa o perfil padrão do Claude/Cursor para instâncias isoladas.
+# Importa o perfil padrão do Claude/Cursor/Codex para instâncias isoladas.
 #
 # Uso:
 #   ./scripts/import.sh
 #   ./scripts/import.sh claude
 #   ./scripts/import.sh cursor
+#   ./scripts/import.sh codex
 #   SKIP_IMPORT=1 ./scripts/macos/setup-desktop.sh   # setup sem perguntar
 
 set -e

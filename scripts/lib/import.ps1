@@ -3,6 +3,7 @@ function Get-DefaultUserDataDir {
     switch ($Service) {
         "claude" { return Join-Path $env:APPDATA "Claude" }
         "cursor" { return Join-Path $env:APPDATA "Cursor" }
+        "codex" { return Join-Path $env:USERPROFILE ".codex" }
         default { throw "Serviço desconhecido: $Service" }
     }
 }
@@ -12,6 +13,7 @@ function Get-DefaultExtensionsDir {
     switch ($Service) {
         "cursor" { return Join-Path $env:USERPROFILE ".cursor\extensions" }
         "claude" { return $null }
+        "codex" { return $null }
         default { throw "Serviço desconhecido: $Service" }
     }
 }
@@ -34,7 +36,11 @@ function Test-InstanceHasProfileData {
         (Join-Path $Dir "User"),
         (Join-Path $Dir "vm_bundles"),
         (Join-Path $Dir "Local Storage"),
-        (Join-Path $Dir "IndexedDB")
+        (Join-Path $Dir "IndexedDB"),
+        (Join-Path $Dir "config.toml"),
+        (Join-Path $Dir "auth.json"),
+        (Join-Path $Dir "history.jsonl"),
+        (Join-Path $Dir "sessions")
     )
     foreach ($path in $markers) {
         if (Test-Path -LiteralPath $path) {
@@ -78,17 +84,24 @@ function Wait-ProfilesUnlocked {
 }
 
 function Copy-Profile {
-    param([string]$Source, [string]$Destination)
+    param(
+        [string]$Source,
+        [string]$Destination,
+        [string[]]$ExcludeFiles = @()
+    )
     New-Item -ItemType Directory -Path $Destination -Force | Out-Null
     $excludeDirs = @(
         "Cache", "CachedData", "CachedExtensionVSIXs", "Code Cache",
         "GPUCache", "DawnGraphiteCache", "DawnWebGPUCache", "Crashpad", "logs"
     )
-    $excludeFiles = @("SingletonLock", "SingletonSocket", "SingletonCookie")
+    $excludeFileList = @("SingletonLock", "SingletonSocket", "SingletonCookie")
+    if ($ExcludeFiles) {
+        $excludeFileList += $ExcludeFiles
+    }
     $args = @(
         $Source, $Destination, "/E", "/NFL", "/NDL", "/NJH", "/NJS", "/nc", "/ns", "/np",
         "/XD"
-    ) + $excludeDirs + @("/XF") + $excludeFiles
+    ) + $excludeDirs + @("/XF") + $excludeFileList
     & robocopy @args | Out-Null
     if ($LASTEXITCODE -ge 8) {
         throw "Falha ao copiar $Source → $Destination (robocopy $LASTEXITCODE)"
@@ -99,19 +112,34 @@ function Import-DefaultToInstance {
     param([string]$Service, [string]$Name)
     $src = Get-DefaultUserDataDir $Service
     $dest = Join-Path (Get-ServiceInstancesBase $Service) $Name
-    Write-Host "Copiando perfil padrão → ${Service}:$Name"
-    Write-Host "  de: $src"
-    Write-Host "  para: $dest"
+    if ($env:SETUP_QUIET -ne "1") {
+        Write-Host "Copiando perfil padrão → ${Service}:$Name"
+        Write-Host "  de: $src"
+        Write-Host "  para: $dest"
+    }
     Initialize-InstanceDir $Service $dest
-    Copy-Profile $src $dest
+    if ($Service -eq "codex") {
+        Copy-Profile $src $dest -ExcludeFiles @("auth.json")
+        if ($env:SETUP_QUIET -ne "1") {
+            Write-Host "  auth.json não copiado (refresh OAuth é de uso único)."
+            Write-Host "  Nesta instância: $(Get-CodexShimName $Name) login"
+            Write-Host "  Não use ~/.codex e esta pasta ao mesmo tempo com o mesmo login."
+        }
+    } else {
+        Copy-Profile $src $dest
+    }
     $extSrc = Get-DefaultExtensionsDir $Service
     if ($extSrc -and (Test-Path $extSrc)) {
         $extDest = Join-Path $dest "extensions"
         New-Item -ItemType Directory -Path $extDest -Force | Out-Null
-        Write-Host "  extensões: $extSrc → $extDest"
+        if ($env:SETUP_QUIET -ne "1") {
+            Write-Host "  extensões: $extSrc → $extDest"
+        }
         Copy-Profile $extSrc $extDest
     }
-    Write-Host "Pronto: ${Service}:$Name"
+    if ($env:SETUP_QUIET -ne "1") {
+        Write-Host "Pronto: ${Service}:$Name"
+    }
 }
 
 function Get-ImportSelection {
@@ -139,80 +167,36 @@ function Prompt-AndImportDefaultData {
     if (-not [Environment]::UserInteractive) { return }
     if (-not $Names -or $Names.Count -eq 0) { return }
 
-    $src = Get-DefaultUserDataDir $Service
-    if (-not (Test-Path $src)) {
-        Write-Host "Perfil padrão do $(Get-ServiceLabel $Service) não encontrado ($src). Pulando import."
-        return
-    }
-
-    $count = $Names.Count
-    $allN = $count + 1
-    $skipN = $count + 2
-    Write-Host ""
-    Write-Host "Quer colocar os dados do $(Get-ServiceLabel $Service) padrão em:"
-    for ($i = 0; $i -lt $count; $i++) {
-        $name = $Names[$i]
-        $dest = Get-InstanceDir $Service $name
-        if (Test-InstanceHasProfileData $dest) {
-            Write-Host "  $($i + 1)) Somente no $name  (já tem dados)"
-        } else {
-            Write-Host "  $($i + 1)) Somente no $name"
+    $empty = @()
+    foreach ($name in $Names) {
+        if (-not (Test-InstanceHasProfileData (Get-InstanceDir $Service $name))) {
+            $empty += $name
         }
     }
-    Write-Host "  $allN) Todas as instâncias vazias (não mexe nas que já têm dados)"
-    Write-Host "  $skipN) Não importar"
-    Write-Host "Várias: 1,3"
-    Write-Host ""
-    Write-Host "O perfil original não é apagado. Setup nunca apaga pastas de instâncias existentes."
-    $ans = Read-Host "Escolha [${skipN}]"
+    if ($empty.Count -eq 0) { return }
 
-    try {
-        $chosen = @(Get-ImportSelection -Answer $ans -Names $Names)
-    } catch {
-        Write-Host $_
-        Write-Host "Import cancelado."
-        return
-    }
-
-    if ($chosen.Count -eq 0) {
-        Write-Host "Import do $(Get-ServiceLabel $Service) pulado."
+    $src = Get-DefaultUserDataDir $Service
+    if (-not (Test-Path $src)) {
         return
     }
 
     $destNames = @()
-    if ($chosen.Count -eq 1 -and $chosen[0] -eq "__ALL__") {
-        foreach ($name in $Names) {
-            if (Test-InstanceHasProfileData (Get-InstanceDir $Service $name)) {
-                Write-Host "Mantendo ${Service}:$name (já tem dados)."
-                continue
-            }
-            $destNames += $name
-        }
-    } else {
-        foreach ($name in $chosen) {
-            if (Test-InstanceHasProfileData (Get-InstanceDir $Service $name)) {
-                if (Confirm-OverwriteInstance $name) {
-                    $destNames += $name
-                } else {
-                    Write-Host "Mantendo ${Service}:$name."
-                }
-                continue
-            }
+    foreach ($name in $empty) {
+        $ans = (Read-Host "Copiar perfil original do $(Get-ServiceLabel $Service) para $name? [y/N]").Trim()
+        Write-Host "----------"
+        if ($ans -match '^[yYsS]') {
             $destNames += $name
         }
     }
 
-    if ($destNames.Count -eq 0) {
-        Write-Host "Nada para importar."
-        return
-    }
+    if ($destNames.Count -eq 0) { return }
 
     $lockDirs = @(Get-DefaultUserDataDir $Service)
     foreach ($name in $destNames) {
         $lockDirs += Get-InstanceDir $Service $name
     }
     if (-not (Wait-ProfilesUnlocked -Dirs $lockDirs)) {
-        Write-Host "Import do $(Get-ServiceLabel $Service) cancelado."
+        Write-Host "Cópia do $(Get-ServiceLabel $Service) cancelada."
         return
     }
 

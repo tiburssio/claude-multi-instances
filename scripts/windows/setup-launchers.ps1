@@ -5,12 +5,15 @@
 #   powershell -ExecutionPolicy Bypass -File scripts/windows/setup-launchers.ps1 -Service claude
 
 param(
-    [ValidateSet("claude", "cursor")]
+    [ValidateSet("claude", "cursor", "codex")]
     [string]$Service
 )
 
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "..\lib\common.ps1")
+if ($env:SETUP_QUIET -eq "1") {
+    function Write-Host { }
+}
 
 $instances = @(Get-Instances -Filter $Service)
 if ($env:LAUNCHER_DIR) {
@@ -50,9 +53,15 @@ foreach ($instance in $instances) {
     $shortcutPath = Join-Path $desktopDir "$label ($($instance.Name)).lnk"
     $shell = New-Object -ComObject WScript.Shell
     $shortcut = $shell.CreateShortcut($shortcutPath)
-    $shortcut.TargetPath = $appPath
-    $shortcut.Arguments = Get-WindowsLaunchArgs $instance.Service $instanceDir
-    $shortcut.WorkingDirectory = Get-ServiceInstancesBase $instance.Service
+    if ($instance.Service -eq "codex") {
+        $shortcut.TargetPath = $env:ComSpec
+        $shortcut.Arguments = "/k set `"CODEX_HOME=$instanceDir`" && `"$appPath`""
+        $shortcut.WorkingDirectory = $instanceDir
+    } else {
+        $shortcut.TargetPath = $appPath
+        $shortcut.Arguments = Get-WindowsLaunchArgs $instance.Service $instanceDir
+        $shortcut.WorkingDirectory = Get-ServiceInstancesBase $instance.Service
+    }
     $shortcut.Save()
 
     Write-Host "Criado: $shortcutPath -> dados em $instanceDir"
@@ -100,6 +109,9 @@ Write-Host "IMPORTANTE:"
 Write-Host "- Feche todas as janelas do app antes de logar em uma instância nova."
 Write-Host "- Logue uma conta por vez. Depois de logadas, podem ficar abertas juntas."
 Write-Host "- Lista de contas: $InstancesConf"
+if ($createdServices.ContainsKey("codex")) {
+    Write-Host "- Codex: abre o cmd com CODEX_HOME na pasta da instância. Faça login em cada uma."
+}
 
 foreach ($svc in @($createdServices.Keys)) {
     $names = @($instances | Where-Object { $_.Service -eq $svc } | ForEach-Object { $_.Name })

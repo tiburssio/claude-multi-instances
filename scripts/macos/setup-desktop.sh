@@ -23,25 +23,41 @@ for i in "${!INSTANCE_NAMES[@]}"; do
   app_path="$(service_macos_app_path "$service")"
   instance_dir="$(service_instances_base "$service")/$name"
 
-  if [ ! -d "$app_path" ]; then
+  if ! macos_service_ready "$service"; then
     if ! list_has "$skipped_services" "$service"; then
-      echo "App não encontrado: $app_path ($service)"
+      if [ "$service" = "codex" ]; then
+        echo "codex não encontrado no PATH"
+      else
+        echo "App não encontrado: $app_path ($service)"
+      fi
       skipped_services="$(list_add "$skipped_services" "$service")"
     fi
     continue
   fi
 
   prepare_instance_dir "$service" "$instance_dir"
+  if [ "$service" = "codex" ] && [ ! -x "$instance_dir/run" ]; then
+    echo "Não consegui criar o runner do Codex em $instance_dir"
+    continue
+  fi
   launcher_path="$LAUNCHER_DIR/$label ($name).command"
-  launch_line="$(macos_launch_line "$service" "$app_path" "$instance_dir")"
-  launch_line="${launch_line%$'\n'}"
-
-  cat > "$launcher_path" <<EOF
+  if [ "$service" = "codex" ]; then
+    cat > "$launcher_path" <<EOF
+#!/bin/bash
+# Launcher isolado: $service:$name
+# Diretório de dados: $instance_dir
+exec "$instance_dir/run" "\$@"
+EOF
+  else
+    launch_line="$(macos_launch_line "$service" "$app_path" "$instance_dir")"
+    launch_line="${launch_line%$'\n'}"
+    cat > "$launcher_path" <<EOF
 #!/bin/bash
 # Launcher isolado: $service:$name
 # Diretório de dados: $instance_dir
 $launch_line
 EOF
+  fi
 
   chmod +x "$launcher_path"
   echo "Criado: $launcher_path  -> dados em $instance_dir"
@@ -51,7 +67,7 @@ done
 
 if [ "$created" -eq 0 ]; then
   if [ -n "$FILTER" ]; then
-    echo "Ajuste CLAUDE_APP_PATH / CURSOR_APP_PATH se instalou em outro lugar."
+    echo "Ajuste CLAUDE_APP_PATH / CURSOR_APP_PATH / CODEX_BIN se instalou em outro lugar."
   fi
   die "Nenhum launcher criado."
 fi
@@ -83,6 +99,10 @@ if list_has "$created_services" claude; then
 fi
 if list_has "$created_services" cursor; then
   echo "- Cursor: o Dock e o comando 'cursor' continuam no perfil original."
+fi
+if list_has "$created_services" codex; then
+  echo "- Codex: abre o TUI no Terminal com CODEX_HOME na pasta da instância."
+  echo "- Codex: faça login em cada pasta (codex login). Não copie auth.json."
 fi
 echo "- Lista de contas: $INSTANCES_CONF"
 

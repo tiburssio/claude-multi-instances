@@ -11,8 +11,13 @@ function Confirm-Service {
     switch ($Service) {
         "claude" { return }
         "cursor" { return }
+        "codex" { return }
         default { throw "Serviço desconhecido: $Service" }
     }
+}
+
+function Get-AllServices {
+    return @("claude", "cursor", "codex")
 }
 
 function Get-ServiceLabel {
@@ -20,6 +25,7 @@ function Get-ServiceLabel {
     switch ($Service) {
         "claude" { return "Claude" }
         "cursor" { return "Cursor" }
+        "codex" { return "Codex" }
         default { throw "Serviço desconhecido: $Service" }
     }
 }
@@ -29,7 +35,98 @@ function Get-ServiceInstancesBase {
     switch ($Service) {
         "claude" { return Join-Path $env:USERPROFILE ".claude-instances" }
         "cursor" { return Join-Path $env:USERPROFILE ".cursor-instances" }
+        "codex" { return Join-Path $env:USERPROFILE ".codex-instances" }
         default { throw "Serviço desconhecido: $Service" }
+    }
+}
+
+function Get-CodexUserBinDir {
+    if ($env:CODEX_USER_BIN) { return $env:CODEX_USER_BIN }
+    return Join-Path $env:USERPROFILE ".local\bin"
+}
+
+function Get-CodexShimName {
+    param([string]$Name)
+    return "codex_$Name"
+}
+
+function Test-OurCodexShim {
+    param([string]$Path)
+    $base = Split-Path -Leaf $Path
+    if ($base -notlike "codex_*") { return $false }
+    if (-not (Test-Path -LiteralPath $Path)) { return $false }
+    $head = Get-Content -LiteralPath $Path -TotalCount 8 -ErrorAction SilentlyContinue
+    return (($head -join "`n") -match "claude-multi-instances-codex-shim")
+}
+
+function Write-CodexRunner {
+    param([string]$InstanceDir)
+    $name = Split-Path -Leaf $InstanceDir
+    New-Item -ItemType Directory -Path $InstanceDir -Force | Out-Null
+    $bindir = Get-CodexUserBinDir
+    New-Item -ItemType Directory -Path $bindir -Force | Out-Null
+    $shim = Join-Path $bindir "$(Get-CodexShimName $name).cmd"
+    if ((Test-Path -LiteralPath $shim) -and -not (Test-OurCodexShim $shim)) {
+        Write-Host "Aviso: $shim já existe e não é nosso."
+        return
+    }
+    @(
+        "@echo off"
+        "REM claude-multi-instances-codex-shim"
+        "set `"CODEX_HOME=$InstanceDir`""
+        "if not exist `"%CODEX_HOME%`" mkdir `"%CODEX_HOME%`""
+        "if defined CODEX_BIN ("
+        "  `"%CODEX_BIN%`" %*"
+        ") else ("
+        "  codex %*"
+        ")"
+    ) | Set-Content -Path $shim -Encoding ASCII
+}
+
+function Remove-StaleCodexShims {
+    $bindir = Get-CodexUserBinDir
+    if (-not (Test-Path -LiteralPath $bindir)) { return }
+    $keep = @{}
+    foreach ($key in @(Get-ConfKeys -Filter "codex")) {
+        $name = $key.Substring($key.IndexOf(":") + 1)
+        $keep["$(Get-CodexShimName $name).cmd"] = $true
+    }
+    Get-ChildItem -LiteralPath $bindir -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like "codex_*.cmd" } |
+        ForEach-Object {
+            if (-not (Test-OurCodexShim $_.FullName)) { return }
+            if ($keep.ContainsKey($_.Name)) { return }
+            Remove-Item -LiteralPath $_.FullName -Force
+        }
+}
+
+function Ensure-CodexUserBinOnPath {
+    $bindir = Get-CodexUserBinDir
+    New-Item -ItemType Directory -Path $bindir -Force | Out-Null
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    if (-not $userPath) { $userPath = "" }
+    $parts = @($userPath -split ";" | Where-Object { $_ })
+    if ($parts -contains $bindir) { return }
+    $newPath = if ($userPath) { "$bindir;$userPath" } else { $bindir }
+    [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
+    $env:Path = "$bindir;$env:Path"
+}
+
+function Write-CodexTerminalCommands {
+    $keys = @(Get-ConfKeys -Filter "codex")
+    if ($keys.Count -eq 0) { return }
+    $bindir = Get-CodexUserBinDir
+    Write-Host "Codex é CLI. No terminal:"
+    foreach ($key in $keys) {
+        $name = $key.Substring($key.IndexOf(":") + 1)
+        Write-Host "  $(Get-CodexShimName $name)"
+    }
+    $onPath = $false
+    foreach ($part in @($env:Path -split ";")) {
+        if ($part -eq $bindir) { $onPath = $true; break }
+    }
+    if (-not $onPath) {
+        Write-Host "Abra um terminal novo (comando em $bindir)."
     }
 }
 
@@ -52,10 +149,31 @@ function Get-DefaultIcon {
             switch ($Service) {
                 "claude" { return "🤖" }
                 "cursor" { return "💻" }
+                "codex" { return "🧠" }
                 default { throw "Serviço desconhecido: $Service" }
             }
         }
     }
+}
+
+function Get-CodexBin {
+    if ($env:CODEX_BIN -and (Test-Path -LiteralPath $env:CODEX_BIN)) {
+        return $env:CODEX_BIN
+    }
+    $cmd = Get-Command codex -ErrorAction SilentlyContinue
+    if ($cmd) {
+        if ($cmd.Source) { return $cmd.Source }
+        if ($cmd.Path) { return $cmd.Path }
+    }
+    $candidates = @(
+        (Join-Path $env:USERPROFILE ".local\bin\codex.exe"),
+        (Join-Path $env:USERPROFILE "AppData\Roaming\npm\codex.cmd"),
+        (Join-Path $env:LOCALAPPDATA "npm\codex.cmd")
+    )
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate) { return $candidate }
+    }
+    return $null
 }
 
 function Get-WindowsAppPath {
@@ -76,6 +194,7 @@ function Get-WindowsAppPath {
             }
             return $null
         }
+        "codex" { return Get-CodexBin }
         default { throw "Serviço desconhecido: $Service" }
     }
 }
@@ -88,6 +207,7 @@ function Get-WindowsLaunchArgs {
             $extensionsDir = Join-Path $InstanceDir "extensions"
             return "--user-data-dir=`"$InstanceDir`" --extensions-dir=`"$extensionsDir`""
         }
+        "codex" { return "" }
         default { throw "Serviço desconhecido: $Service" }
     }
 }
@@ -100,6 +220,7 @@ function Initialize-InstanceDir {
         "cursor" {
             New-Item -ItemType Directory -Path (Join-Path $InstanceDir "extensions") -Force | Out-Null
         }
+        "codex" { Write-CodexRunner $InstanceDir }
         default { throw "Serviço desconhecido: $Service" }
     }
 }
@@ -208,6 +329,49 @@ function Get-LauncherInstanceName {
     return $name
 }
 
+function Test-OurDesktopLauncher {
+    param([string]$FileName, [string]$Label)
+    $name = Get-LauncherInstanceName $FileName $Label
+    if (-not $name -or $name -notmatch '^[A-Za-z0-9._-]+$') {
+        return $false
+    }
+    $expected = "$Label ($name)"
+    foreach ($ext in @(".lnk", ".command", ".desktop")) {
+        if ($FileName -eq "$expected$ext") {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Remove-OurDesktopLaunchers {
+    param([string[]]$KeepServices = @())
+    $any = $false
+    foreach ($svc in @(Get-AllServices)) {
+        if ($KeepServices -contains $svc) {
+            continue
+        }
+        $label = Get-ServiceLabel $svc
+        foreach ($dir in Get-DesktopDirs) {
+            $launchers = Get-ChildItem -Path $dir -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -like "$label (*).lnk" -or $_.Name -like "$label (*).command" -or $_.Name -like "$label (*).desktop" }
+            foreach ($launcher in $launchers) {
+                if (-not (Test-OurDesktopLauncher $launcher.Name $label)) {
+                    continue
+                }
+                Remove-Item -LiteralPath $launcher.FullName -Force
+                if ($env:SETUP_QUIET -ne "1") {
+                    Write-Host "Removido (atalho nosso): $($launcher.FullName)"
+                }
+                $any = $true
+            }
+        }
+    }
+    if ($any -and $env:SETUP_QUIET -ne "1") {
+        Write-Host "Limpei atalhos nossos da Área de Trabalho (só 'Claude/Cursor/Codex (nome).lnk')."
+    }
+}
+
 function Test-PositiveInt {
     param([string]$Value)
     return [bool]($Value -match '^[1-9][0-9]*$')
@@ -269,6 +433,9 @@ function Get-InstanceArtifacts {
     }
     $start = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs"
     $paths += Join-Path $start "$display.lnk"
+    if ($Service -eq "codex") {
+        $paths += Join-Path (Get-CodexUserBinDir) "$(Get-CodexShimName $Name).cmd"
+    }
     return $paths
 }
 
@@ -353,18 +520,14 @@ function Add-InstanceToConf {
 
 function Write-ConfInstances {
     param([string]$Filter = "")
-    Write-Host "Contas em $InstancesConf`:"
+    Write-Host "Contas na lista (instances.conf):"
     $keys = @(Get-ConfKeys -Filter $Filter)
     if ($keys.Count -eq 0) {
-        if ($Filter) {
-            Write-Host "  (nenhuma de $(Get-ServiceLabel $Filter))"
-        } else {
-            Write-Host "  (nenhuma)"
-        }
+        Write-Host "* (nenhuma)"
         return
     }
-    for ($i = 0; $i -lt $keys.Count; $i++) {
-        Write-Host "  $($i + 1)) $($keys[$i])"
+    foreach ($key in $keys) {
+        Write-Host "* $key"
     }
 }
 
@@ -372,12 +535,12 @@ function Prompt-AndAddInstances {
     param([string]$Filter = "")
 
     while ($true) {
-        Write-Host ""
         Write-ConfInstances -Filter $Filter
         Write-Host ""
-        Write-Host "  1) Adicionar instância"
-        Write-Host "  2) Seguir"
-        $ans = Read-Host "Escolha [2]"
+        Write-Host "  1) Criar conta nova"
+        Write-Host "  2) Seguir com as contas acima"
+        $ans = (Read-Host "Escolha [2]").Trim()
+        Write-Host "----------"
         if (-not $ans -or $ans -eq "2") { return }
         if ($ans -ne "1") {
             Write-Host "Opção inválida."
@@ -386,32 +549,31 @@ function Prompt-AndAddInstances {
 
         $service = $Filter
         if (-not $service) {
-            Write-Host ""
-            Write-Host "  1) Claude"
-            Write-Host "  2) Cursor"
-            switch (Read-Host "App") {
+            Write-Host "  1) Claude  (app Desktop)"
+            Write-Host "  2) Cursor  (IDE)"
+            Write-Host "  3) Codex   (CLI no Terminal)"
+            switch ((Read-Host "Escolha").Trim()) {
                 "1" { $service = "claude" }
                 "2" { $service = "cursor" }
+                "3" { $service = "codex" }
                 default {
+                    Write-Host "----------"
                     Write-Host "Opção inválida."
                     continue
                 }
             }
-        } else {
-            Write-Host "App: $(Get-ServiceLabel $service)"
+            Write-Host "----------"
         }
 
-        $name = (Read-Host "Nome da instância (ex: work, freela)").Trim()
+        Write-Host "App: $(Get-ServiceLabel $service)"
+        $name = (Read-Host "Nome (ex: work, pessoal)").Trim()
+        Write-Host "----------"
         try {
             Add-InstanceToConf -Service $service -Name $name
         } catch {
             Write-Host $_
             continue
         }
-        $dest = Join-Path (Get-ServiceInstancesBase $service) $name
-        Write-Host "Adicionado ${service}:$name"
-        Write-Host "  conf: $InstancesConf"
-        Write-Host "  pasta (no configurar): $dest"
     }
 }
 
@@ -426,7 +588,12 @@ function Prompt-AndRemoveInstances {
     $skipN = $count + 2
 
     Write-Host ""
-    Write-Host "Quais instâncias apagar? (lista de $InstancesConf)"
+    Write-Host "Apagar instância isolada — irreversível."
+    Write-Host "Apaga a pasta da conta, os atalhos dela e a linha no conf."
+    Write-Host "NÃO desinstala o app e NÃO mexe no perfil original."
+    Write-Host "Enter ou a última opção cancelam."
+    Write-Host ""
+    Write-Host "Quais apagar? (lista de $InstancesConf)"
     for ($i = 0; $i -lt $count; $i++) {
         $item = $items[$i]
         $dest = Join-Path (Get-ServiceInstancesBase $item.Service) $item.Name

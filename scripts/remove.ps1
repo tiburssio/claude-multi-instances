@@ -7,7 +7,7 @@
 #   powershell -ExecutionPolicy Bypass -File scripts/remove.ps1 -Service all -Yes
 
 param(
-    [ValidateSet("claude", "cursor", "all")]
+    [ValidateSet("claude", "cursor", "codex", "all")]
     [string]$Service,
 
     [string[]]$Instance,
@@ -41,7 +41,7 @@ if ($Instance) {
 }
 
 if ($Service) {
-    $services = if ($Service -eq "all") { @("claude", "cursor") } else { @($Service) }
+    $services = if ($Service -eq "all") { @(Get-AllServices) } else { @($Service) }
     foreach ($svc in $services) {
         $selected += @($items | Where-Object { $_.Service -eq $svc })
     }

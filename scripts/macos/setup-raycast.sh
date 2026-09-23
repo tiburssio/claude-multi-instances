@@ -24,15 +24,23 @@ for i in "${!INSTANCE_NAMES[@]}"; do
   app_path="$(service_macos_app_path "$service")"
   instance_dir="$(service_instances_base "$service")/$name"
 
-  if [ ! -d "$app_path" ]; then
+  if ! macos_service_ready "$service"; then
     if ! list_has "$skipped_services" "$service"; then
-      echo "App não encontrado: $app_path ($service)"
+      if [ "$service" = "codex" ]; then
+        echo "codex não encontrado no PATH"
+      else
+        echo "App não encontrado: $app_path ($service)"
+      fi
       skipped_services="$(list_add "$skipped_services" "$service")"
     fi
     continue
   fi
 
   prepare_instance_dir "$service" "$instance_dir"
+  if [ "$service" = "codex" ] && [ ! -x "$instance_dir/launch.command" ]; then
+    echo "Não consegui criar o runner do Codex em $instance_dir"
+    continue
+  fi
 
   launch_line="$(macos_launch_line "$service" "$app_path" "$instance_dir")"
   launch_line="${launch_line%$'\n'}"
@@ -82,12 +90,15 @@ echo ""
 echo "No Raycast (só precisa cadastrar essa pasta uma vez):"
 echo "1. Preferências (Cmd+,) → Extensions → Script Commands."
 echo "2. '+' → Add Script Directory → $scripts_dir"
-echo "3. Busque por Claude ou Cursor. As instâncias aparecem como"
-echo "   'Cursor (Personal)', 'Claude (Work)', etc. — não o app original."
+echo "3. Busque por Claude, Cursor ou Codex. As instâncias aparecem como"
+echo "   'Cursor (Personal)', 'Claude (Work)', 'Codex (Work)', etc."
 echo ""
 echo "Lista de contas: $INSTANCES_CONF"
 if list_has "$created_services" cursor; then
   echo "O Dock e o comando 'cursor' continuam no perfil original."
+fi
+if list_has "$created_services" codex; then
+  echo "Codex no Raycast abre o Terminal (TUI). Faça login em cada instância."
 fi
 
 prompt_and_import_for_services "$created_services"

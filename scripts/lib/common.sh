@@ -36,9 +36,13 @@ list_add() {
   fi
 }
 
+all_services() {
+  printf '%s' "claude cursor codex"
+}
+
 validate_service() {
   case "$1" in
-    claude|cursor) ;;
+    claude|cursor|codex) ;;
     *)
       die "Serviço desconhecido: $1"
       ;;
@@ -49,6 +53,7 @@ service_label() {
   case "$1" in
     claude) echo "Claude" ;;
     cursor) echo "Cursor" ;;
+    codex) echo "Codex" ;;
     *)
       die "Serviço desconhecido: $1"
       ;;
@@ -59,6 +64,7 @@ service_instances_base() {
   case "$1" in
     claude) echo "$HOME/.claude-instances" ;;
     cursor) echo "$HOME/.cursor-instances" ;;
+    codex) echo "$HOME/.codex-instances" ;;
     *)
       die "Serviço desconhecido: $1"
       ;;
@@ -84,16 +90,201 @@ service_macos_app_path() {
   case "$1" in
     claude) echo "${CLAUDE_APP_PATH:-/Applications/Claude.app}" ;;
     cursor) echo "${CURSOR_APP_PATH:-/Applications/Cursor.app}" ;;
+    codex)
+      if [ -n "${CODEX_APP_PATH:-}" ]; then
+        echo "$CODEX_APP_PATH"
+      elif [ -d "/Applications/Codex.app" ]; then
+        echo "/Applications/Codex.app"
+      else
+        echo "/Applications/ChatGPT.app"
+      fi
+      ;;
     *)
       die "Serviço desconhecido: $1"
       ;;
   esac
 }
 
+resolve_codex_bin() {
+  local candidate
+  if [ -n "${CODEX_BIN:-}" ] && [ -x "$CODEX_BIN" ]; then
+    printf '%s' "$CODEX_BIN"
+    return 0
+  fi
+  if command -v codex >/dev/null 2>&1; then
+    command -v codex
+    return 0
+  fi
+  for candidate in \
+    "$HOME/.local/bin/codex" \
+    /opt/homebrew/bin/codex \
+    /usr/local/bin/codex \
+    /usr/bin/codex
+  do
+    if [ -x "$candidate" ]; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+macos_service_ready() {
+  case "$1" in
+    claude|cursor) [ -d "$(service_macos_app_path "$1")" ] ;;
+    codex) resolve_codex_bin >/dev/null 2>&1 ;;
+    *)
+      die "Serviço desconhecido: $1"
+      ;;
+  esac
+}
+
+codex_user_bin_dir() {
+  if [ -n "${CODEX_USER_BIN:-}" ]; then
+    printf '%s' "$CODEX_USER_BIN"
+    return 0
+  fi
+  printf '%s' "$HOME/.local/bin"
+}
+
+codex_shim_name() {
+  printf 'codex_%s' "$1"
+}
+
+is_our_codex_shim() {
+  local path="$1" base target
+  base="$(basename "$path")"
+  case "$base" in
+    codex_*) ;;
+    *) return 1 ;;
+  esac
+  if [ -L "$path" ]; then
+    target="$(readlink "$path")"
+    case "$target" in
+      */.codex-instances/*/run) return 0 ;;
+    esac
+    return 1
+  fi
+  [ -f "$path" ] || return 1
+  grep -q 'claude-multi-instances-codex-shim' "$path" 2>/dev/null
+}
+
+codex_user_bin_on_path() {
+  local bindir="${1:-$(codex_user_bin_dir)}"
+  case ":$PATH:" in
+    *":$bindir:"*) return 0 ;;
+  esac
+  return 1
+}
+
+ensure_codex_user_bin_on_path() {
+  local bindir rc line
+  bindir="$(codex_user_bin_dir)"
+  mkdir -p "$bindir"
+  if codex_user_bin_on_path "$bindir"; then
+    return 0
+  fi
+  line="export PATH=\"$bindir:\$PATH\"  # claude-multi-instances-codex"
+  case "${SHELL##*/}" in
+    bash)
+      rc="$HOME/.bashrc"
+      if [ ! -f "$rc" ] && [ -f "$HOME/.bash_profile" ]; then
+        rc="$HOME/.bash_profile"
+      fi
+      ;;
+    fish)
+      rc="$HOME/.config/fish/config.fish"
+      line="fish_add_path $bindir  # claude-multi-instances-codex"
+      mkdir -p "$(dirname "$rc")"
+      ;;
+    *)
+      rc="$HOME/.zshrc"
+      ;;
+  esac
+  if [ -f "$rc" ] && grep -q 'claude-multi-instances-codex' "$rc"; then
+    return 0
+  fi
+  printf '\n%s\n' "$line" >> "$rc"
+}
+
+write_codex_runner() {
+  local instance_dir="$1" dest name bindir shim bin
+  mkdir -p "$instance_dir"
+  name="$(basename "$instance_dir")"
+  dest="$instance_dir/run"
+  bin="$(resolve_codex_bin)" || bin=""
+  cat > "$dest" <<EOF
+#!/bin/bash
+# claude-multi-instances-codex-shim
+export CODEX_HOME="$instance_dir"
+mkdir -p "\$CODEX_HOME"
+bin="$bin"
+if [ -z "\$bin" ] || [ ! -x "\$bin" ]; then
+  bin="\$(command -v codex 2>/dev/null || true)"
+fi
+if [ -z "\$bin" ] || [ ! -x "\$bin" ]; then
+  echo "codex não encontrado no PATH" >&2
+  exit 1
+fi
+exec "\$bin" "\$@"
+EOF
+  chmod +x "$dest"
+  cp "$dest" "$instance_dir/launch.command"
+  chmod +x "$instance_dir/launch.command"
+
+  bindir="$(codex_user_bin_dir)"
+  mkdir -p "$bindir"
+  shim="$bindir/$(codex_shim_name "$name")"
+  if [ -e "$shim" ] || [ -L "$shim" ]; then
+    if ! is_our_codex_shim "$shim"; then
+      echo "Aviso: $shim já existe e não é nosso." >&2
+      return 0
+    fi
+  fi
+  ln -sfn "$dest" "$shim"
+}
+
+prune_codex_shims() {
+  local bindir keep="" name dest base
+  bindir="$(codex_user_bin_dir)"
+  [ -d "$bindir" ] || return 0
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    name="${key#*:}"
+    keep="$(list_add "$keep" "$(codex_shim_name "$name")")"
+  done < <(list_conf_keys codex)
+  shopt -s nullglob
+  for dest in "$bindir"/codex_*; do
+    is_our_codex_shim "$dest" || continue
+    base="$(basename "$dest")"
+    if list_has "$keep" "$base"; then
+      continue
+    fi
+    rm -f "$dest"
+  done
+  shopt -u nullglob
+}
+
+print_codex_terminal_commands() {
+  local key name bindir
+  [ -n "$(list_conf_keys codex)" ] || return 0
+  bindir="$(codex_user_bin_dir)"
+  echo "Codex é CLI. No terminal:"
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    name="${key#*:}"
+    echo "  $(codex_shim_name "$name")"
+  done < <(list_conf_keys codex)
+  if ! codex_user_bin_on_path "$bindir"; then
+    echo "Abra um terminal novo (comando em $bindir)."
+  fi
+}
+
 service_linux_icon() {
   case "$1" in
     claude) echo "com.anthropic.Claude" ;;
     cursor) echo "cursor" ;;
+    codex) echo "utilities-terminal" ;;
     *)
       die "Serviço desconhecido: $1"
       ;;
@@ -105,6 +296,7 @@ service_linux_comment() {
   case "$service" in
     claude) echo "Instância isolada do Claude Desktop ($name)" ;;
     cursor) echo "Instância isolada do Cursor ($name)" ;;
+    codex) echo "Instância isolada do Codex CLI ($name)" ;;
     *)
       die "Serviço desconhecido: $service"
       ;;
@@ -129,6 +321,7 @@ default_icon() {
       case "$service" in
         claude) echo "🤖" ;;
         cursor) echo "💻" ;;
+        codex) echo "🧠" ;;
         *)
           die "Serviço desconhecido: $service"
           ;;
@@ -147,6 +340,9 @@ macos_launch_line() {
       printf 'open -n -a "%s" --args --user-data-dir="%s" --extensions-dir="%s/extensions"\n' \
         "$app_path" "$instance_dir" "$instance_dir"
       ;;
+    codex)
+      printf 'open "%s/launch.command"\n' "$instance_dir"
+      ;;
     *)
       die "Serviço desconhecido: $service"
       ;;
@@ -162,6 +358,9 @@ linux_exec_args() {
     cursor)
       printf -- '--user-data-dir="%s" --extensions-dir="%s/extensions"' "$instance_dir" "$instance_dir"
       ;;
+    codex)
+      printf ''
+      ;;
     *)
       die "Serviço desconhecido: $service"
       ;;
@@ -174,6 +373,7 @@ prepare_instance_dir() {
   case "$service" in
     claude) ;;
     cursor) mkdir -p "$instance_dir/extensions" ;;
+    codex) write_codex_runner "$instance_dir" ;;
     *)
       die "Serviço desconhecido: $service"
       ;;
@@ -211,9 +411,12 @@ each_desktop_launcher() {
     shopt -s nullglob
     for launcher in \
       "$desktop_dir/$label ("*.command \
-      "$desktop_dir/$label ("*.desktop
+      "$desktop_dir/$label ("*.desktop \
+      "$desktop_dir/$label ("*.lnk
     do
-      echo "$launcher"
+      if is_our_desktop_launcher "$launcher" "$label"; then
+        echo "$launcher"
+      fi
     done
     shopt -u nullglob
   done < <(desktop_dirs)
@@ -282,7 +485,15 @@ ask() {
   local ans
   printf "%s" "$prompt" >&2
   read -r ans || true
+  printf '%s\n' "----------" >&2
   trim "$ans"
+}
+
+say() {
+  if [ "${SETUP_QUIET:-}" = "1" ]; then
+    return 0
+  fi
+  echo "$@"
 }
 
 is_positive_int() {
@@ -359,6 +570,9 @@ each_instance_artifact() {
   display="$(instance_display_name "$service" "$name")"
   dest="$(service_instances_base "$service")/$name"
   printf '%s\n' "$dest"
+  if [ "$service" = "codex" ]; then
+    printf '%s\n' "$(codex_user_bin_dir)/$(codex_shim_name "$name")"
+  fi
   printf '%s\n' "$(raycast_scripts_dir)/$service-$name.sh"
   printf '%s\n' "$(macos_apps_dir)/$display.app"
   printf '%s\n' "$HOME/.local/share/applications/$display.desktop"
@@ -381,13 +595,36 @@ remove_desktop_launchers_for_service() {
     shopt -s nullglob
     for path in \
       "$desktop_dir/$label ("*.command \
-      "$desktop_dir/$label ("*.desktop
+      "$desktop_dir/$label ("*.desktop \
+      "$desktop_dir/$label ("*.lnk
     do
+      if ! is_our_desktop_launcher "$path" "$label"; then
+        continue
+      fi
       rm -f "$path"
-      echo "Removido: $path"
+      say "Removido (atalho nosso): $path"
     done
     shopt -u nullglob
   done < <(desktop_dirs)
+}
+
+# keep = serviços cujo atalho DEVE ficar na mesa nesta rodada (escolheu Área de Trabalho).
+cleanup_our_desktop_launchers() {
+  local keep="${1:-}"
+  local service path any=0
+  for service in $(all_services); do
+    if [ -n "$keep" ] && list_has "$keep" "$service"; then
+      continue
+    fi
+    while IFS= read -r path; do
+      [ -n "$path" ] || continue
+      any=1
+    done < <(each_desktop_launcher "$service")
+    remove_desktop_launchers_for_service "$service"
+  done
+  if [ "$any" -eq 1 ]; then
+    say "Limpei atalhos nossos da Área de Trabalho (só 'Claude/Cursor/Codex (nome).command')."
+  fi
 }
 
 remove_instance() {
@@ -501,37 +738,31 @@ append_instance_to_conf() {
 
 print_conf_instances() {
   local filter="${1:-}"
-  local key i=1
-  echo "Contas em $INSTANCES_CONF:"
+  local key
+  echo "Contas na lista (instances.conf):"
   if [ -z "$(list_conf_keys "$filter")" ]; then
-    if [ -n "$filter" ]; then
-      echo "  (nenhuma de $(service_label "$filter"))"
-    else
-      echo "  (nenhuma)"
-    fi
+    echo "* (nenhuma)"
     return 0
   fi
   while IFS= read -r key; do
     [ -n "$key" ] || continue
-    echo "  $i) $key"
-    i=$((i + 1))
+    echo "* $key"
   done < <(list_conf_keys "$filter")
 }
 
 prompt_and_add_instances() {
   local filter="${1:-}"
-  local service name dest ans
+  local service name ans
 
   if [ ! -t 0 ]; then
     return 0
   fi
 
   while true; do
-    echo ""
     print_conf_instances "$filter"
     echo ""
-    echo "  1) Adicionar instância"
-    echo "  2) Seguir"
+    echo "  1) Criar conta nova"
+    echo "  2) Seguir com as contas acima"
     ans="$(ask "Escolha [2]: ")"
     case "$ans" in
       ""|2) return 0 ;;
@@ -544,14 +775,14 @@ prompt_and_add_instances() {
 
     if [ -n "$filter" ]; then
       service="$filter"
-      echo "App: $(service_label "$service")"
     else
-      echo ""
-      echo "  1) Claude"
-      echo "  2) Cursor"
-      case "$(ask "App: ")" in
+      echo "  1) Claude  (app Desktop)"
+      echo "  2) Cursor  (IDE)"
+      echo "  3) Codex   (CLI no Terminal)"
+      case "$(ask "Escolha: ")" in
         1) service="claude" ;;
         2) service="cursor" ;;
+        3) service="codex" ;;
         *)
           echo "Opção inválida."
           continue
@@ -559,14 +790,11 @@ prompt_and_add_instances() {
       esac
     fi
 
-    name="$(ask "Nome da instância (ex: work, freela): ")"
+    echo "App: $(service_label "$service")"
+    name="$(ask "Nome (ex: work, pessoal): ")"
     if ! append_instance_to_conf "$service" "$name"; then
       continue
     fi
-    dest="$(service_instances_base "$service")/$name"
-    echo "Adicionado $service:$name"
-    echo "  conf: $INSTANCES_CONF"
-    echo "  pasta (no configurar): $dest"
   done
 }
 
@@ -701,6 +929,12 @@ resolve_linux_app_path() {
         return 0
       fi
       ;;
+    codex)
+      if resolve_codex_bin >/dev/null 2>&1; then
+        resolve_codex_bin
+        return 0
+      fi
+      ;;
     *)
       die "Serviço desconhecido: $service"
       ;;
@@ -730,6 +964,22 @@ launcher_name_from_filename() {
   printf '%s' "$name"
 }
 
+# Só atalhos no formato "Claude (work).command" com nome de instância válido.
+is_our_desktop_launcher() {
+  local path="$1" label="$2"
+  local base name expected
+  base="$(basename "$path")"
+  name="$(launcher_name_from_filename "$base" "$label")"
+  if [ -z "$name" ] || [[ ! "$name" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    return 1
+  fi
+  expected="$label ($name)"
+  case "$base" in
+    "$expected.command"|"$expected.desktop"|"$expected.lnk") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 prune_stale_launchers() {
   local desktop_dir="$1" label="$2"
   shift 2
@@ -740,8 +990,12 @@ prune_stale_launchers() {
   shopt -s nullglob
   for launcher in \
     "$desktop_dir/$label ("*.command \
-    "$desktop_dir/$label ("*.desktop
+    "$desktop_dir/$label ("*.desktop \
+    "$desktop_dir/$label ("*.lnk
   do
+    if ! is_our_desktop_launcher "$launcher" "$label"; then
+      continue
+    fi
     base="$(basename "$launcher")"
     name="$(launcher_name_from_filename "$base" "$label")"
     keep=0
@@ -802,7 +1056,12 @@ prompt_and_remove_instances() {
   skip_n=$((count + 2))
 
   echo ""
-  echo "Quais instâncias apagar? (lista de $INSTANCES_CONF)"
+  echo "Apagar instância isolada — irreversível."
+  echo "Apaga a pasta da conta, os atalhos dela e a linha no conf."
+  echo "NÃO desinstala o app e NÃO mexe no perfil original (Dock)."
+  echo "Enter ou a última opção cancelam."
+  echo ""
+  echo "Quais apagar? (lista de $INSTANCES_CONF)"
   i=0
   while [ "$i" -lt "$count" ]; do
     service="${INSTANCE_SERVICES[$i]}"
